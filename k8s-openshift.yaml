@@ -1,0 +1,219 @@
+# Network Policy to allow ingress controller to reach adrs-data
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-openshift-ingress-to-adrs-data
+spec:
+  podSelector:
+    matchLabels:
+      app: adrs-data
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: openshift-ingress
+    ports:
+    - port: 8000
+      protocol: TCP
+  policyTypes:
+  - Ingress
+
+---
+# OpenShift deployment for ADRS API Demo
+# Uses OpenShift's internal image registry
+#
+# Quick Start:
+#   1. oc login <your-cluster-url>
+#   2. oc project leolin2-ns
+#   3. oc new-build --name=adrs-data --binary --strategy=docker
+#   4. oc start-build adrs-data --from-dir=. --follow
+#   5. oc apply -f k8s-openshift.yaml
+#   6. oc port-forward svc/adrs-data 8000:8000
+
+---
+# PostgreSQL Database Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: pgvector/pgvector:pg16
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_USER
+          value: "postgres"
+        - name: POSTGRES_PASSWORD
+          value: "postgres"
+        - name: POSTGRES_DB
+          value: "adrs"
+        - name: PGDATA
+          value: "/var/lib/postgresql/data/pgdata"
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "1"
+      volumes:
+      - name: postgres-storage
+        emptyDir: {}
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  ports:
+  - port: 5432
+    targetPort: 5432
+  selector:
+    app: postgres
+
+---
+# API Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: adrs-data
+  labels:
+    app: adrs-data
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: adrs-data
+  template:
+    metadata:
+      labels:
+        app: adrs-data
+    spec:
+      # Wait for postgres then init database
+      initContainers:
+      - name: wait-for-postgres
+        image: postgres:16-alpine
+        command:
+        - sh
+        - -c
+        - |
+          until pg_isready -h postgres -p 5432 -U postgres; do
+            echo "Waiting for postgres..."
+            sleep 2
+          done
+          echo "PostgreSQL is ready!"
+      - name: init-db
+        # This references the image built in OpenShift
+        image: image-registry.openshift-image-registry.svc:5000/leolin2-ns/adrs-data:latest
+        command: ["uv", "run", "python", "create_tables.py"]
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://postgres:postgres@postgres:5432/adrs"
+        - name: POSTGRES_URL
+          value: "postgresql://postgres:postgres@postgres:5432/postgres"
+        - name: UV_CACHE_DIR
+          value: "/tmp/uv-cache"
+      containers:
+      - name: api
+        # This references the image built in OpenShift
+        image: image-registry.openshift-image-registry.svc:5000/leolin2-ns/adrs-data:latest
+        ports:
+        - containerPort: 8000
+        env:
+        - name: DATABASE_URL
+          value: "postgresql://postgres:postgres@postgres:5432/adrs"
+        - name: POSTGRES_URL
+          value: "postgresql://postgres:postgres@postgres:5432/postgres"
+        - name: UV_CACHE_DIR
+          value: "/tmp/uv-cache"
+        resources:
+          requests:
+            memory: "8Gi"
+            cpu: "1"
+            ephemeral-storage: "10Gi"
+          limits:
+            memory: "8Gi"
+            cpu: "2"
+            ephemeral-storage: "20Gi"
+---
+# API Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: adrs-data
+  labels:
+    app: adrs-data
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8000
+    targetPort: 8000
+    protocol: TCP
+    name: http
+  selector:
+    app: adrs-data
+
+---
+# OpenShift Route for external access (general API)
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: adrs-data
+  labels:
+    app: adrs-data
+  annotations:
+    haproxy.router.openshift.io/timeout: 24h
+    haproxy.router.openshift.io/proxy-body-size: 5g
+spec:
+  host: adrs-data.leolin2-ns.vpc-int.res.ibm.com
+  to:
+    kind: Service
+    name: adrs-data
+    weight: 100
+  port:
+    targetPort: 8000
+
+---
+# Separate route for uploads with extended timeout
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: adrs-data-upload
+  labels:
+    app: adrs-data
+  annotations:
+    haproxy.router.openshift.io/timeout: 24h
+    haproxy.router.openshift.io/proxy-body-size: 5g
+    haproxy.router.openshift.io/timeout-tunnel: 24h
+    haproxy.router.openshift.io/timeout-client: 24h
+    haproxy.router.openshift.io/timeout-server: 24h
+spec:
+  host: adrs-data.leolin2-ns.vpc-int.res.ibm.com
+  path: /upload
+  to:
+    kind: Service
+    name: adrs-data
+    weight: 100
+  port:
+    targetPort: 8000
