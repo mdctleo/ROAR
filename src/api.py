@@ -29,7 +29,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from insert_adrs_campaign import CampaignInserter, detect_system_type
+from insert_adrs_campaign import CampaignInserter
+from system_detection import detect_system_type
 # from parse_auto import parse_auto_campaign  # Disabled: auto-parsing fallback removed
 from parse_skydiscover import parse_skydiscover_campaign
 from parse_openevolve import parse_openevolve_campaign
@@ -64,13 +65,18 @@ async def preload_embedding_model():
 
 
 class SystemType(str, Enum):
-    """Supported campaign system types."""
+    """Supported campaign system types.
 
-    SKYDISCOVER = "skydiscover"
-    OPENEVOLVE = "openevolve"
-    GEPA = "gepa"
-    SHINKA = "shinka"
-    CODING_AGENT = "coding_agent"
+    Each maps to a native deterministic parser; the marker files that identify each
+    (checked by system_detection.detect_system_type via the parser's own matches())
+    are noted below.
+    """
+
+    SKYDISCOVER = "skydiscover"    # output/ wrapper, or checkpoints/ + config.yaml/run_metadata.json
+    OPENEVOLVE = "openevolve"      # checkpoints/ (root or results/) + openevolve_*.log / best_program_info.json
+    GEPA = "gepa"                  # gepa_result.json / candidates.json / gepa_state.bin / best_program.py
+    SHINKA = "shinka"              # evolution_db.sqlite
+    CODING_AGENT = "coding_agent"  # summary.json (framework="coding_agent") + iterations.jsonl
 
 
 class UploadResponse(BaseModel):
@@ -196,7 +202,7 @@ def extract_tar(tar_path: Path, extract_to: Path) -> tuple[bool, str, list[Path]
         if not campaign_paths:
             return False, (
                 "No recognized campaign format found in archive. "
-                "Supported formats: skydiscover, openevolve, gepa, coding_agent."
+                "Supported formats: skydiscover, openevolve, gepa, shinka, coding_agent."
             ), []
         else:
             print(f"[EXTRACT] Found {len(campaign_paths)} recognized campaign folder(s)", flush=True)
@@ -231,7 +237,7 @@ def validate_campaign_format(
         error_msg = (
             f"Unrecognized campaign format in '{campaign_path.name}' "
             f"(files: {files}, dirs: {dirs}). "
-            f"Supported formats: skydiscover, openevolve, gepa, coding_agent."
+            f"Supported formats: skydiscover, openevolve, gepa, shinka, coding_agent."
         )
         return False, error_msg, None
 
@@ -535,7 +541,7 @@ async def upload_campaign(
     author: Annotated[str, Form(description="Email address of the campaign author")],
     system_type: Annotated[
         SystemType,
-        Form(description="Campaign system type (skydiscover, openevolve, gepa, coding_agent)"),
+        Form(description="Campaign system type (skydiscover, openevolve, gepa, shinka, coding_agent)"),
     ],
     version: Annotated[str, Form(description="GitHub commit link (optional)")] = "",
 ) -> dict:
@@ -548,7 +554,7 @@ async def upload_campaign(
     Args:
         file: tar.gz archive containing the campaign data
         author: Email address of the campaign author
-        system_type: The format of the data (skydiscover, openevolve, gepa, coding_agent)
+        system_type: The format of the data (skydiscover, openevolve, gepa, shinka, coding_agent)
         version: GitHub commit link of the system that produced this campaign
 
     Returns:
@@ -928,12 +934,19 @@ async def get_upload_instructions():
             "why": "Centralizes upload metadata in one place. Author identifies who ran the campaign; version links to the exact code that produced it.",
         },
         "step_1_detect_system_type": {
-            "description": "Check folder structure to identify format",
+            "description": (
+                "Check folder structure to identify format. Detection is owned by the "
+                "parsers (system_detection.detect_system_type); rules are tried in this "
+                "order and the first match wins. Markers are looked for at the run root "
+                "or under a results/ subdir where the parser supports it (shinka, gepa, "
+                "openevolve)."
+            ),
             "decision_tree": [
-                {"check": "evolution_trace.jsonl exists", "system_type": "openevolve"},
-                {"check": "summary.json with framework='gepa' AND iterations.jsonl", "system_type": "gepa"},
+                {"check": "evolution_db.sqlite", "system_type": "shinka"},
+                {"check": "gepa_result.json OR candidates.json OR gepa_state.bin OR best_program.py", "system_type": "gepa"},
                 {"check": "summary.json with framework='coding_agent' AND iterations.jsonl", "system_type": "coding_agent"},
-                {"check": "config.yaml + output/ OR checkpoints/*/programs/", "system_type": "skydiscover"},
+                {"check": "output/ OR (checkpoints/ AND config.yaml/skydiscover_config.yaml/run_metadata.json/output_old/)", "system_type": "skydiscover"},
+                {"check": "checkpoints/ AND (openevolve_*.log OR best/best_program_info.json); evolution_trace.jsonl is optional", "system_type": "openevolve"},
                 {"check": "none match", "action": "use /upload/parsed with a custom parser script"},
             ],
         },
@@ -944,7 +957,7 @@ async def get_upload_instructions():
             "fields": {
                 "file": "tar.gz archive containing campaign folder(s) with author_input.json",
                 "author": "Email address of the uploader (required)",
-                "system_type": "Detected value from step_1 (skydiscover, openevolve, gepa, coding_agent) — required, no auto-detect",
+                "system_type": "Detected value from step_1 (skydiscover, openevolve, gepa, shinka, coding_agent) — required, no auto-detect",
                 "version": "GitHub commit link (optional, overridden by author_input.json if present)",
             },
             "create_archive": "tar -czf upload.tar.gz campaign_folder/",
@@ -1443,7 +1456,7 @@ async def get_upload_formats():
                 "logs": "output/logs/*.log — timestamps for started_at/ended_at",
             },
             "system": {
-                "name": "Hardcoded string identifying the framework (e.g., 'skydiscover', 'openevolve', 'gepa', 'coding_agent')",
+                "name": "Hardcoded string identifying the framework (e.g., 'skydiscover', 'openevolve', 'gepa', 'shinka', 'coding_agent')",
                 "version": "author_input.json → version (GitHub commit link)",
             },
             "campaign": {

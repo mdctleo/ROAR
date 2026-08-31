@@ -31,6 +31,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from model_dirname import models_from_path
 from adrs_models import (
     ADRSArtifact,
     ADRSCampaign,
@@ -99,6 +100,11 @@ def load_json(file_path: Path, warn_on_error: bool = True) -> dict | list | None
         return None
 
 
+# Marker files that identify a native GEPA run (any one present at the run root or
+# under results/). Shared by _resolve_base and matches() so the two can't drift.
+GEPA_MARKERS = ("gepa_result.json", "candidates.json", "gepa_state.bin", "best_program.py")
+
+
 class GEPAParser:
     """Parse a native GEPA run folder into ADRS models."""
 
@@ -117,12 +123,19 @@ class GEPAParser:
     @staticmethod
     def _resolve_base(folder_path: Path) -> Path:
         """Find the dir holding the GEPA artifacts (run root or a results/ subdir)."""
-        for name in ("gepa_result.json", "candidates.json", "gepa_state.bin", "best_program.py"):
+        for name in GEPA_MARKERS:
             if (folder_path / name).exists():
                 return folder_path
             if (folder_path / "results" / name).exists():
                 return folder_path / "results"
         return folder_path
+
+    @classmethod
+    def matches(cls, folder_path: Path) -> bool:
+        """True if folder_path is a native GEPA run (any GEPA_MARKERS file at the run
+        root or under results/). Used by system_detection."""
+        base = cls._resolve_base(folder_path)
+        return any((base / name).exists() for name in GEPA_MARKERS)
 
     def _logs_dir(self) -> Path | None:
         """Locate the run's logs/ dir (sibling of results/, or under the run root)."""
@@ -130,6 +143,17 @@ class GEPAParser:
             if cand.is_dir():
                 return cand
         return None
+
+    def _extract_models(self) -> list[str] | None:
+        """Model(s) for the run, verbatim. GEPA does not persist the model anywhere in its
+        output, so check the result defensively, then fall back to the run dir name."""
+        for key in ("model", "model_name", "models", "llm_model"):
+            v = self.result.get(key)
+            if isinstance(v, str) and v:
+                return [v]
+            if isinstance(v, list) and v:
+                return [str(x) for x in v]
+        return models_from_path(self.folder_path)
 
     def parse(self) -> ADRSParsedCampaign | None:
         """Parse all campaign data. Returns ADRSParsedCampaign or None."""
@@ -303,7 +327,7 @@ class GEPAParser:
             ended_at=None,
             config_used=config_used,
             algorithm_used="gepa",
-            models_used=None,
+            models_used=self._extract_models(),
             total_cost_usd=None,
             total_tokens=None,
             final_summary=None,
@@ -349,7 +373,7 @@ class GEPAParser:
             ended_at=None,
             config_used={"result_available": False},
             algorithm_used="gepa",
-            models_used=None,
+            models_used=self._extract_models(),
             total_cost_usd=None,
             total_tokens=None,
             final_summary=None,
@@ -424,6 +448,7 @@ def main():
     if parsed:
         print(f"\nSuccessfully parsed campaign: {parsed.campaign.name}")
         print(f"  System: {parsed.campaign.system.name}")
+        print(f"  Models: {parsed.campaign.models_used}")
         print(f"  Candidates: {len(parsed.candidates)}")
         total_measurements = sum(len(m) for m in parsed.measurements.values())
         print(

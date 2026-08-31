@@ -24,6 +24,7 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
+from model_dirname import models_from_path
 from adrs_models import (
     ADRSArtifact,
     ADRSCampaign,
@@ -117,6 +118,12 @@ class ShinkaParser:
             return folder_path / "results"
         return folder_path
 
+    @classmethod
+    def matches(cls, folder_path: Path) -> bool:
+        """True if folder_path is a native ShinkaEvolve run (has evolution_db.sqlite
+        at the run root or under results/). Used by system_detection."""
+        return (cls._resolve_base(folder_path) / DB_NAME).exists()
+
     def _logs_dir(self) -> Path | None:
         for cand in (self.base.parent / "logs", self.folder_path / "logs", self.base / "logs"):
             if cand.is_dir():
@@ -205,13 +212,22 @@ class ShinkaParser:
             m = re.search(r"num_islands:\s*(\d+)", text)
             if m:
                 cfg["num_islands"] = int(m.group(1))
-            models = re.findall(r"^\s*-\s*([\w./:-]+)\s*$", text, re.MULTILINE)
-            # Heuristic: capture the llm_models list block.
+            # `llm_models` may be a plain YAML list, or an OmegaConf-serialized block
+            # (`llm_models: &id !!python/object:...` with names nested as `_val: <model>`).
             lm = re.search(r"llm_models:\s*\n((?:\s*-\s*.+\n)+)", text)
             if lm:
                 cfg["llm_models"] = re.findall(r"-\s*([\w./:-]+)", lm.group(1))
-            elif models:
-                cfg["llm_models"] = models
+            else:
+                # Isolate the top-level `llm_models:` block (excludes meta_/novelty_llm_models
+                # by anchoring the key at its own indent) and read every nested `_val:`.
+                block = re.search(
+                    r"^(?P<ind> *)llm_models:.*\n(?P<body>(?:(?P=ind) +.*\n|[ \t]*\n)*)",
+                    text,
+                    re.MULTILINE,
+                )
+                vals = re.findall(r"_val:\s*([\w./:-]+)", block.group("body")) if block else []
+                if vals:
+                    cfg["llm_models"] = vals
             return cfg
 
     def _config_get(self, *keys):
@@ -330,6 +346,9 @@ class ShinkaParser:
             models_used = [str(m) for m in llm_models]
         elif isinstance(llm_models, str):
             models_used = [llm_models]
+        # Fallback when the config has no model: the run dir name (verbatim).
+        if not models_used:
+            models_used = models_from_path(self.folder_path)
 
         config_used = {
             "num_islands": num_islands,

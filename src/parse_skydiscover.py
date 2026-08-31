@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Parser for SkyDiscover/OpenEvolve campaign outputs.
+"""Parser for SkyDiscover campaign outputs.
 
-SkyDiscover/OpenEvolve uses a different output structure from NOUS:
+SkyDiscover uses an output structure:
 - config.yaml: Campaign configuration
 - output/summary.json: Final summary with best score
 - output/best/: Best program found
@@ -98,6 +98,10 @@ def load_yaml(file_path: Path) -> dict | None:
 class SkyDiscoverParser:
     """Parse a SkyDiscover campaign folder into ADRS models."""
 
+    # Files/dirs a SkyDiscover run produces but OpenEvolve does not. Their presence
+    # alongside a shared checkpoints/ dir is what identifies a SkyDiscover run.
+    MARKERS = ("config.yaml", "skydiscover_config.yaml", "run_metadata.json", "output_old")
+
     def __init__(self, folder_path: Path):
         self.folder_path = folder_path
         self.output_dir: Path = folder_path / "output"  # may be overridden in parse()
@@ -107,6 +111,41 @@ class SkyDiscoverParser:
         self.author_input: dict = {}
         self.program_db: dict[str, dict] = {}  # program_id -> program_info
         self.copy_to_original: dict[str, str] = {}  # copy_id -> original_id (migrations + spawn copies)
+
+    @classmethod
+    def _has_native_signal(cls, folder_path: Path) -> bool:
+        """True for a *bare* SkyDiscover run (odellia-style: checkpoints/ at the run root,
+        no output/ wrapper and none of MARKERS). Keyed on traits SkyDiscover emits that a
+        native OpenEvolve run never does, so this can't steal an OpenEvolve run."""
+        if (folder_path / "search").is_dir():  # evox backend
+            return True
+        if any(folder_path.glob("*_iteration_stats_*.jsonl")):  # adaevolve backend
+            return True
+        # Definitive discriminator: SkyDiscover program records key the source as
+        # "solution"; OpenEvolve uses "code". Peek the first checkpoint program JSON.
+        for pj in sorted((folder_path / "checkpoints").glob("*/programs/*.json")):
+            if pj.name.startswith("._"):
+                continue
+            try:
+                with open(pj) as f:
+                    obj = json.load(f)
+            except (OSError, ValueError):
+                return False
+            return isinstance(obj, dict) and "solution" in obj and "code" not in obj
+        return False
+
+    @classmethod
+    def matches(cls, folder_path: Path) -> bool:
+        """True if folder_path is a SkyDiscover run: an output/ wrapper (layout 1), or a
+        root checkpoints/ dir plus either a SkyDiscover-specific marker file or a native
+        SkyDiscover signal (layout 2, incl. bare dumps). The marker/signal requirement
+        disambiguates from OpenEvolve, which also has checkpoints/ but neither. Used by
+        system_detection."""
+        if (folder_path / "output").is_dir():
+            return True
+        if (folder_path / "checkpoints").is_dir():
+            return any((folder_path / m).exists() for m in cls.MARKERS) or cls._has_native_signal(folder_path)
+        return False
 
     def parse(self) -> ADRSParsedCampaign | None:
         """Parse all campaign data. Returns ADRSParsedCampaign or None."""

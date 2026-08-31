@@ -21,9 +21,11 @@ when present but is OPTIONAL; timestamps then come from the programs themselves.
 
 import hashlib
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
+from model_dirname import models_from_path
 from adrs_models import (
     ADRSArtifact,
     ADRSCampaign,
@@ -129,12 +131,50 @@ class OpenEvolveParser:
             return folder_path / "results"
         return folder_path
 
+    @classmethod
+    def matches(cls, folder_path: Path) -> bool:
+        """True if folder_path is a native OpenEvolve run: checkpoints/ (at the run root
+        or under results/) plus a native OpenEvolve signal — a best/best_program_info.json
+        or an openevolve_*.log. The native signal keeps this from claiming a SkyDiscover
+        run, which also has checkpoints/ but no such log. Used by system_detection."""
+        base = cls._resolve_base(folder_path)
+        if not (base / "checkpoints").is_dir():
+            return False
+        if (base / "best" / "best_program_info.json").exists():
+            return True
+        for logs in (base / "logs", folder_path / "logs", base.parent / "logs"):
+            if logs.is_dir() and any(logs.glob("openevolve_*.log")):
+                return True
+        return False
+
     def _logs_dir(self) -> Path | None:
         """Locate the run's logs/ dir (under base, run root, or base's parent)."""
         for cand in (self.base / "logs", self.folder_path / "logs", self.base.parent / "logs"):
             if cand.is_dir():
                 return cand
         return None
+
+    def _extract_models(self) -> list[str] | None:
+        """Model(s) for the run, verbatim. OpenEvolve records the model only in its run
+        log (`Initialized ... LLM ... with model: X`); fall back to the run dir name."""
+        logs = self._logs_dir()
+        if logs:
+            log_files = sorted(logs.glob("*.log"))
+            if log_files:
+                try:
+                    text = log_files[-1].read_text(errors="ignore")
+                except OSError:
+                    text = ""
+                found: list[str] = []
+                seen: set[str] = set()
+                for m in re.finditer(r"[Ii]nitialized .*?LLM .*?models?:\s*([\w./:-]+)", text):
+                    tok = m.group(1)
+                    if tok not in seen:
+                        seen.add(tok)
+                        found.append(tok)
+                if found:
+                    return found
+        return models_from_path(self.folder_path)
 
     def parse(self) -> ADRSParsedCampaign | None:
         """Parse all campaign data. Returns ADRSParsedCampaign or None."""
@@ -253,8 +293,8 @@ class OpenEvolveParser:
             started_at=started_at,
             ended_at=ended_at,
             config_used=config_used,
-            algorithm_used="map-elites",
-            models_used=None,
+            algorithm_used="openevolve",
+            models_used=self._extract_models(),
             total_cost_usd=None,
             total_tokens=None,
             final_summary=None,
@@ -535,6 +575,7 @@ def main():
         print(f"System: {result.campaign.system.name} v{result.campaign.system.version}")
         print(f"Research question: {result.campaign.research_question}")
         print(f"Algorithm: {result.campaign.algorithm_used}")
+        print(f"Models: {result.campaign.models_used}")
         print(f"Candidates: {len(result.candidates)}")
         print(f"Edges: {len(result.candidate_edges)}")
         print(f"Measurements: {len(result.measurements)}")
