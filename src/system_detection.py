@@ -21,21 +21,16 @@ from typing import Callable
 from parse_shinka import ShinkaParser
 from parse_gepa import GEPAParser
 from parse_coding_agent import matches_coding_agent
-from oneoff_parsers.parse_gepa_curated import matches_gepa_curated
 from parse_skydiscover import SkyDiscoverParser
 from parse_openevolve import OpenEvolveParser
 
-# Ordered (system_type, matches) registry. First match wins.
-#
-# gepa_curated sits after coding_agent: both the curated-GEPA and coding_agent bundles are
-# summary.json + iterations.jsonl, disambiguated only by summary.framework, so coding_agent
-# (framework=="coding_agent") is tried first and gepa_curated claims framework=="gepa".
-# Native gepa/coding_agent runs are unaffected (native gepa has no summary.json).
+# Ordered (system_type, matches) registry. First match wins. Every entry is a
+# deterministic parser that lives in src/; this module imports nothing from one-off
+# ingestion helpers.
 _REGISTRY: list[tuple[str, Callable[[Path], bool]]] = [
     ("shinka", ShinkaParser.matches),
     ("gepa", GEPAParser.matches),
     ("coding_agent", matches_coding_agent),
-    ("gepa_curated", matches_gepa_curated),
     ("skydiscover", SkyDiscoverParser.matches),
     ("openevolve", OpenEvolveParser.matches),
 ]
