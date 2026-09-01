@@ -100,6 +100,20 @@ def load_json(file_path: Path, warn_on_error: bool = True) -> dict | list | None
         return None
 
 
+def load_yaml(file_path: Path) -> dict | None:
+    """Load a YAML file into a dict; None if missing/unparseable (yaml is optional)."""
+    if not file_path.exists():
+        return None
+    try:
+        import yaml
+
+        with open(file_path) as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 # Marker files that identify a native GEPA run (any one present at the run root or
 # under results/). Shared by _resolve_base and matches() so the two can't drift.
 GEPA_MARKERS = ("gepa_result.json", "candidates.json", "gepa_state.bin", "best_program.py")
@@ -144,9 +158,21 @@ class GEPAParser:
                 return cand
         return None
 
+    def _extract_research_question(self) -> str | None:
+        """Research question, read verbatim from a declared `research_question` key in the
+        run's research_question.yaml. GEPA persists no config of its own, so this is
+        author-supplied (run root, results/ dir, or run root parent). A dedicated filename
+        (not config.yaml) is used so the author-supplied file can't trip SkyDiscover detection,
+        which treats config.yaml as one of its markers."""
+        for cand in (self.base, self.folder_path, self.base.parent):
+            cfg = load_yaml(cand / "research_question.yaml")
+            if isinstance(cfg, dict) and cfg.get("research_question"):
+                return cfg["research_question"]
+        return None
+
     def _extract_models(self) -> list[str] | None:
-        """Model(s) for the run, verbatim. GEPA does not persist the model anywhere in its
-        output, so check the result defensively, then fall back to the run dir name."""
+        """Model(s) for the run, verbatim: read from the GEPA result if present, else
+        fall back to the run dir name."""
         for key in ("model", "model_name", "models", "llm_model"):
             v = self.result.get(key)
             if isinstance(v, str) and v:
@@ -322,7 +348,7 @@ class GEPAParser:
             system=system,
             author=self.author_input.get("author", ""),
             name=self.folder_path.name,
-            research_question=None,
+            research_question=self._extract_research_question(),
             started_at=None,
             ended_at=None,
             config_used=config_used,
@@ -368,7 +394,7 @@ class GEPAParser:
             system=system,
             author=self.author_input.get("author", ""),
             name=self.folder_path.name,
-            research_question=None,
+            research_question=self._extract_research_question(),
             started_at=None,
             ended_at=None,
             config_used={"result_available": False},

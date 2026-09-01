@@ -93,6 +93,20 @@ def load_json(file_path: Path, warn_on_error: bool = True) -> dict | None:
         return None
 
 
+def load_yaml(file_path: Path) -> dict | None:
+    """Load a YAML file into a dict; None if missing/unparseable (yaml is optional)."""
+    if not file_path.exists():
+        return None
+    try:
+        import yaml
+
+        with open(file_path) as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
 def load_jsonl(file_path: Path) -> list[dict]:
     """Load JSONL file, return list of records."""
     if not file_path.exists():
@@ -302,24 +316,15 @@ class OpenEvolveParser:
         )
 
     def _extract_research_question(self) -> str | None:
-        """Extract research question/objective from prompts."""
-        # Try to get from first program's prompts
-        for prog in self.program_db.values():
-            prompts = prog.get("prompts")
-            if prompts:
-                # Look in full_rewrite_user prompt
-                full_rewrite = prompts.get("full_rewrite_user", {})
-                system_prompt = full_rewrite.get("system", "")
-                if system_prompt:
-                    # Extract problem description - look for key phrases
-                    if "KV cache eviction" in system_prompt:
-                        return "Optimize KV cache eviction policy for vLLM inference server"
-                    # Return first meaningful line
-                    lines = system_prompt.strip().split("\n")
-                    for line in lines:
-                        line = line.strip()
-                        if line and not line.startswith("#") and len(line) > 20:
-                            return line[:200]
+        """Research question, read verbatim from a declared `research_question` key in the
+        run's research_question.yaml. OpenEvolve persists no config into the run dir, so this
+        is author-supplied (run root, results/ dir, or run root parent). A dedicated filename
+        (not config.yaml) is used so the author-supplied file can't trip SkyDiscover detection,
+        which treats config.yaml as one of its markers."""
+        for cand in (self.base, self.folder_path, self.base.parent):
+            cfg = load_yaml(cand / "research_question.yaml")
+            if isinstance(cfg, dict) and cfg.get("research_question"):
+                return cfg["research_question"]
         return None
 
     def _extract_config(self) -> dict:

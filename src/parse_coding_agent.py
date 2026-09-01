@@ -82,7 +82,7 @@ def parse_coding_agent_campaign(folder_path: Path) -> ADRSParsedCampaign | None:
     ended_at = _parse_timestamp(iterations[-1].get("timestamp"))
 
     # Build campaign
-    research_question = summary.get("target", "unknown")
+    research_question = summary.get("target")
     config_label = summary.get("config", "")
     name = folder_path.name
 

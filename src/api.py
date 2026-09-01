@@ -320,6 +320,30 @@ def inject_author_input(campaign_path: Path, author: str, version: str = "") -> 
             json.dump(data, f, indent=2)
 
 
+def resolve_author_input(campaign_path: Path, boundary: Path) -> dict:
+    """Find the nearest author_input.json at or above a campaign folder, up to the upload
+    root (`boundary`, inclusive).
+
+    author_input.json is batch-level: a single file at the upload root applies to every
+    campaign beneath it, while a campaign's own file overrides the shared one. Returns {}
+    if none is found in that range.
+    """
+    p = campaign_path
+    while True:
+        f = p / "author_input.json"
+        if f.exists():
+            try:
+                with open(f) as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict):
+                    return data
+            except (json.JSONDecodeError, OSError):
+                pass
+        if p == boundary or p.parent == p:
+            return {}
+        p = p.parent
+
+
 async def process_upload_job(
     job_id: str,
     tar_path: Path,
@@ -413,8 +437,14 @@ async def process_upload_job(
                         )
                         continue
 
-                # Inject author_input.json if not already present (web UI upload path)
-                await asyncio.to_thread(inject_author_input, campaign_path, author, version)
+                # Resolve batch-level author/version: a single author_input.json at the
+                # upload root covers every campaign; a campaign's own file or an explicit
+                # form field takes precedence. Materialize it into the campaign folder so
+                # every parser (some read only the run folder) sees it.
+                root_ai = await asyncio.to_thread(resolve_author_input, campaign_path, extract_path)
+                eff_author = author or root_ai.get("author", "")
+                eff_version = version or root_ai.get("version", "")
+                await asyncio.to_thread(inject_author_input, campaign_path, eff_author, eff_version)
 
                 # Parse the campaign(s)
                 parse_start = time.time()
@@ -522,17 +552,19 @@ async def process_upload_job(
             "status": "error",
             "message": f"Unexpected error: {str(e)}",
         })
+        # Hard failure: discard the partial extraction (nothing durable references it).
+        if extract_path and extract_path.exists():
+            shutil.rmtree(extract_path, ignore_errors=True)
 
     finally:
-        # Clean up temporary archive file
+        # Clean up the temporary archive file only. On success the extracted tree is
+        # KEPT under ./data/upload_<ts>/ so the artifact URIs stored in the DB resolve
+        # to real files on disk (see NOTE above). Failure paths clean up explicitly.
         if tar_path.exists():
             try:
                 tar_path.unlink()
             except Exception:
                 pass
-        # Clean up extract path if still exists
-        if extract_path and extract_path.exists():
-            shutil.rmtree(extract_path, ignore_errors=True)
 
 
 @app.post("/upload")
@@ -809,15 +841,18 @@ async def process_parsed_upload_job(
             "status": "error",
             "message": f"Unexpected error: {str(e)}",
         })
+        # Hard failure: discard the partial extraction (nothing durable references it).
+        if extract_path and extract_path.exists():
+            shutil.rmtree(extract_path, ignore_errors=True)
 
     finally:
+        # Keep the extracted tree on success so DB artifact URIs resolve on disk;
+        # only the temporary archive is removed here (failure paths clean up above).
         if tar_path.exists():
             try:
                 tar_path.unlink()
             except Exception:
                 pass
-        if extract_path and extract_path.exists():
-            shutil.rmtree(extract_path, ignore_errors=True)
 
 
 @app.post("/upload/parsed")
@@ -918,10 +953,30 @@ async def get_upload_instructions():
     Follow these steps in order. Use /upload/formats for schema details.
     """
     return {
-        "overview": "Try /upload first with detected system_type. Fall back to /upload/parsed if no parser matches OR if parsing fails.",
-        "step_0_create_author_input": {
-            "description": "ALWAYS create author_input.json before uploading (applies to both /upload and /upload/parsed)",
-            "location": "Place at root of each campaign folder",
+        "overview": (
+            "Try /upload first with detected system_type. Fall back to /upload/parsed if no "
+            "parser matches OR if parsing fails. Two metadata items are mandatory for every "
+            "campaign: author_input.json (batch-level author + version, see step_0) and "
+            "research_question (per-campaign, REQUIRED, see step_0b)."
+        ),
+        "step_0_provide_author_version": {
+            "description": (
+                "Provide author (required) + version (optional) ONCE for the whole upload. These are "
+                "BATCH-LEVEL — one value applies to every campaign in the upload (an upload may contain "
+                "many campaigns). Carries ONLY author + version; the per-campaign research_question does "
+                "NOT go here (see step_0b)."
+            ),
+            "how": {
+                "recommended (/upload)": (
+                    "Pass author and version as form fields on POST /upload — they apply to every "
+                    "campaign in the archive; you do not create any file yourself."
+                ),
+                "embedded (in the archive)": (
+                    "Place a SINGLE author_input.json at the ROOT of the upload (top of the archive, "
+                    "above the campaign folders). The server applies it to every campaign beneath it; "
+                    "a campaign's own author_input.json overrides the shared one."
+                ),
+            },
             "action": "Ask the user for their email and the GitHub repository link + commit hash of the system that produced this campaign",
             "schema": {
                 "author": "Email address of the campaign author (required)",
@@ -931,7 +986,33 @@ async def get_upload_instructions():
                 "author": "researcher@example.com",
                 "version": "https://github.com/acme/skydiscover/commit/a1b2c3d4e5f6",
             },
-            "why": "Centralizes upload metadata in one place. Author identifies who ran the campaign; version links to the exact code that produced it.",
+            "why": "Centralizes batch upload metadata in one place. Author identifies who ran the campaign; version links to the exact code that produced it.",
+        },
+        "step_0b_set_research_question": {
+            "description": (
+                "research_question is REQUIRED for every campaign (DB NOT NULL, Pydantic required). "
+                "Unlike author/version it is PER-CAMPAIGN, so it does NOT belong in author_input.json — "
+                "each parser reads it from the run's own config."
+            ),
+            "deterministic_path": {
+                "how": "Ensure the run's config declares a top-level 'research_question' key. Per framework:",
+                "sources": {
+                    "skydiscover": "config.yaml -> research_question (native)",
+                    "shinka": "experiment_config.yaml -> research_question",
+                    "coding_agent": "summary.json -> target (native)",
+                    "openevolve": "research_question.yaml -> research_question (author-supplied; openevolve persists no config. Dedicated filename, NOT config.yaml, so it can't trip skydiscover detection)",
+                    "gepa": "research_question.yaml -> research_question (author-supplied; gepa persists no config. Dedicated filename, NOT config.yaml, so it can't trip skydiscover detection)",
+                },
+                "shared_question_shortcut": (
+                    "openevolve and gepa also read research_question.yaml from a run's immediate parent, so "
+                    "runs that are DIRECT children of a shared dir can share one research_question.yaml placed "
+                    "there (one level only, not arbitrary ancestors). skydiscover (config.yaml) and shinka "
+                    "(experiment_config.yaml) read only the run's own config, so their research_question "
+                    "must live in each run."
+                ),
+                "if_missing": "POST /upload fails validation (research_question required). Add the key to the config and re-archive.",
+            },
+            "parsed_path": "The ADRSCampaign you emit in _parsed.jsonl MUST have a non-null research_question.",
         },
         "step_1_detect_system_type": {
             "description": (
@@ -945,7 +1026,7 @@ async def get_upload_instructions():
                 {"check": "evolution_db.sqlite", "system_type": "shinka"},
                 {"check": "gepa_result.json OR candidates.json OR gepa_state.bin OR best_program.py", "system_type": "gepa"},
                 {"check": "summary.json with framework='coding_agent' AND iterations.jsonl", "system_type": "coding_agent"},
-                {"check": "output/ OR (checkpoints/ AND config.yaml/skydiscover_config.yaml/run_metadata.json/output_old/)", "system_type": "skydiscover"},
+                {"check": "output/ OR (checkpoints/ AND (a marker file [config.yaml, skydiscover_config.yaml, run_metadata.json, output_old/] OR a native signal [search/ dir, a *_iteration_stats_*.jsonl file, OR a checkpoints/*/programs/*.json keyed on 'solution' not 'code']))", "system_type": "skydiscover"},
                 {"check": "checkpoints/ AND (openevolve_*.log OR best/best_program_info.json); evolution_trace.jsonl is optional", "system_type": "openevolve"},
                 {"check": "none match", "action": "use /upload/parsed with a custom parser script"},
             ],
@@ -955,11 +1036,12 @@ async def get_upload_instructions():
             "when": "System type detected from step_1",
             "content_type": "multipart/form-data",
             "fields": {
-                "file": "tar.gz archive containing campaign folder(s) with author_input.json",
+                "file": "tar.gz archive containing campaign folder(s), a single root author_input.json (or pass author/version as form fields), and each run's config declaring research_question (see step_0b)",
                 "author": "Email address of the uploader (required)",
                 "system_type": "Detected value from step_1 (skydiscover, openevolve, gepa, shinka, coding_agent) — required, no auto-detect",
                 "version": "GitHub commit link (optional, overridden by author_input.json if present)",
             },
+            "precondition": "Every run's config must declare research_question (step_0b) — the parser returns it and the campaign fails validation without it.",
             "create_archive": "tar -czf upload.tar.gz campaign_folder/",
             "poll": "GET /upload/status/{job_id} every 2-5 seconds",
             "success_condition": "status='complete' AND result.success=true",
@@ -980,7 +1062,7 @@ async def get_upload_instructions():
                 "1. GET /upload/formats — read the schema to understand target structure",
                 "2. Read raw campaign files to understand the source data",
                 "3. Read author_input.json — include author in ADRSCampaign and version in ADRSSystem",
-                "4. Write a one-off Python script that maps source → ADRSParsedCampaign",
+                "4. Write a one-off Python script that maps source → ADRSParsedCampaign (research_question is REQUIRED — set a non-null value for every campaign)",
                 "5. Run script to generate _parsed.jsonl (one JSON object per line, one campaign per line)",
                 "6. Place _parsed.jsonl at archive root alongside raw campaign folders",
                 "7. tar -czf upload.tar.gz campaign_folder/ _parsed.jsonl",
@@ -1461,7 +1543,7 @@ async def get_upload_formats():
             },
             "campaign": {
                 "name": "Folder name or summary.json → output_dir",
-                "research_question": "config.yaml → research_question",
+                "research_question": "REQUIRED (non-null). Declared per-campaign in the run's config — per-framework key, see /upload/instructions step_0b",
                 "started_at": "First timestamp in log files",
                 "ended_at": "Last timestamp in log files",
                 "algorithm_used": "config.yaml → search.type or detected from logs",

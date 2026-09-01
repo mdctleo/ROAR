@@ -207,11 +207,17 @@ class ShinkaParser:
             data = yaml.safe_load(text)
             return data if isinstance(data, dict) else {}
         except Exception:
-            # Minimal fallback: pull the two fields we care about.
+            # Minimal fallback: pull the fields we care about. Needed for OmegaConf-serialized
+            # configs (`!!python/object:` tags) that safe_load can't construct.
             cfg: dict = {}
             m = re.search(r"num_islands:\s*(\d+)", text)
             if m:
                 cfg["num_islands"] = int(m.group(1))
+            # research_question is a top-level author-supplied scalar; recover it directly so a
+            # required field isn't lost just because the rest of the config is untagged-unreadable.
+            rq = re.search(r"^research_question:\s*(.+?)\s*$", text, re.MULTILINE)
+            if rq:
+                cfg["research_question"] = rq.group(1).strip().strip("\"'")
             # `llm_models` may be a plain YAML list, or an OmegaConf-serialized block
             # (`llm_models: &id !!python/object:...` with names nested as `_val: <model>`).
             lm = re.search(r"llm_models:\s*\n((?:\s*-\s*.+\n)+)", text)
@@ -368,7 +374,7 @@ class ShinkaParser:
             system=system,
             author=self.author_input.get("author", ""),
             name=self.folder_path.name,
-            research_question=None,
+            research_question=self._config_get("research_question"),
             started_at=started_at,
             ended_at=ended_at,
             config_used=config_used,
