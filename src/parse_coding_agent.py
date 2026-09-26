@@ -42,6 +42,22 @@ def matches_coding_agent(folder_path: Path) -> bool:
         return False
 
 
+def _extract_objective(folder_path: Path) -> str | None:
+    """First non-empty line under the `## Objective` heading of effective_context.md, verbatim."""
+    context_path = folder_path / "effective_context.md"
+    if not context_path.exists():
+        return None
+    in_objective = False
+    with open(context_path) as f:
+        for line in f:
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                in_objective = stripped.lstrip("#").strip().lower() == "objective"
+            elif in_objective and stripped:
+                return stripped
+    return None
+
+
 def parse_coding_agent_campaign(folder_path: Path) -> ADRSParsedCampaign | None:
     """Parse a coding_agent campaign directory into ADRSParsedCampaign."""
     folder_path = Path(folder_path)
@@ -82,7 +98,8 @@ def parse_coding_agent_campaign(folder_path: Path) -> ADRSParsedCampaign | None:
     ended_at = _parse_timestamp(iterations[-1].get("timestamp"))
 
     # Build campaign
-    research_question = summary.get("target")
+    # The run's declared objective; summary.json's "target" is only the workbench target id.
+    research_question = _extract_objective(folder_path) or summary.get("target")
     config_label = summary.get("config", "")
     name = folder_path.name
 

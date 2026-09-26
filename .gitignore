@@ -37,3 +37,10 @@ INTERNAL_*
 src/hf_export/data/
 src/hf_export/*.md
 src/oneoff_parsers/*
+src/*.md
+
+# Run logs and internal results write-ups
+*.log
+*_RESULTS.md
+src/analytics/q5/results_old/
+src/analytics/**/README.md

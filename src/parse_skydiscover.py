@@ -27,6 +27,14 @@ from adrs_models import (
     ADRSSystem,
 )
 
+# SkyDiscover search types that re-implement another framework's mechanism, mapped to that
+# mechanism's name so algorithm_used means the same thing across systems.
+SEARCH_TYPE_TO_MECHANISM = {
+    "openevolve_native": "openevolve",
+    "gepa_native": "gepa",
+    "shinkaevolve": "shinka",
+}
+
 
 def parse_timestamp(ts: float | str | None) -> datetime | None:
     """Parse timestamp (Unix epoch or ISO string) to datetime."""
@@ -328,6 +336,10 @@ class SkyDiscoverParser:
             algorithm = self.run_metadata.get("search")
         if not algorithm:
             algorithm = self._extract_algorithm_from_logs()
+        # The system field already distinguishes SkyDiscover from standalone OpenEvolve, so
+        # SkyDiscover's port of a search is recorded under the mechanism's shared name. The
+        # verbatim search.type is still kept in config_used.
+        algorithm = SEARCH_TYPE_TO_MECHANISM.get(algorithm, algorithm)
 
         # Extract models used from config
         models_used = self._extract_models_used()

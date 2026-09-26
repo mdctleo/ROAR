@@ -31,7 +31,6 @@ from pydantic import BaseModel
 
 from insert_adrs_campaign import CampaignInserter
 from system_detection import detect_system_type
-# from parse_auto import parse_auto_campaign  # Disabled: auto-parsing fallback removed
 from parse_skydiscover import parse_skydiscover_campaign
 from parse_openevolve import parse_openevolve_campaign
 from parse_gepa import parse_gepa_campaign
@@ -279,19 +278,6 @@ async def parse_campaign(campaign_path: Path, system_type: str | None, author: s
         except Exception as e:
             print(f"Parser failed: {e}")
             parsed = None
-
-    # # Fallback to agent-based parsing (disabled)
-    # if parsed is None:
-    #     import os
-    #     if os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN"):
-    #         print(f"Using agent-based parsing for {campaign_path}")
-    #         try:
-    #             parsed = await parse_auto_campaign(campaign_path)
-    #         except Exception as e:
-    #             print(f"Agent-based parsing failed: {e}")
-    #             parsed = None
-    #     else:
-    #         print("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN not set, cannot use agent-based parsing")
 
     # Normalize to list
     if parsed is None:
@@ -1445,6 +1431,113 @@ async def get_code_factors_importance_figure(
 
     try:
         figure_bytes = await asyncio.to_thread(get_factor_importance_figure, None, group_by, problems_list)
+        return Response(content=figure_bytes, media_type="image/png")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Figure generation error: {str(e)}")
+
+
+# ===========================================================================
+# Q5: Closed-Loop Configuration
+# ===========================================================================
+
+
+@app.get("/analytics/recommend")
+async def get_config_recommendation(
+    research_question: str,
+    budget: int = 50,
+    algorithm: str | None = None,
+    model: str | None = None,
+):
+    """Recommend budget-allocation parameters for a research question.
+
+    Returns k_stop (stop a run after this many stagnant iterations) and
+    n_replicates (how many runs to split the budget across), both derived from
+    pooled runs, along with how the problem was matched and how much data
+    supports the recommendation.
+
+    Passing algorithm and model scopes the evidence to that configuration, so
+    the recommendation is one the caller can actually execute. Omitting them
+    pools across every configuration on the problem, which lets a "restart"
+    substitute the model and makes the expected score an upper bound.
+
+    Args:
+        research_question: the problem the user is about to run
+        budget: total iteration budget they intend to spend
+        algorithm: the caller's search algorithm, e.g. "best_of_n"
+        model: the caller's model, as recorded in campaigns.models_used
+    """
+    try:
+        analytics = CampaignAnalytics()
+        return await asyncio.to_thread(
+            analytics.get_recommendation, research_question, budget,
+            algorithm, model,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Recommendation error: {str(e)}")
+
+
+@app.get("/analytics/recommend/gain/figure")
+async def get_recommend_gain_figure(budget: int = 50):
+    """Get the per-cell gain forest plot as PNG.
+
+    The primary Q5 figure: for each (problem, algorithm, model) cell, the gain
+    of ROAR's policy over one full run, with out-of-bag refit-bootstrap
+    intervals over held-out campaigns.
+
+    Args:
+        budget: total iteration budget replayed
+    """
+    from analytics.q5 import get_gain_forest_figure
+    from fastapi.responses import Response
+
+    try:
+        figure_bytes = await asyncio.to_thread(
+            get_gain_forest_figure, None, budget
+        )
+        return Response(content=figure_bytes, media_type="image/png")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Figure generation error: {str(e)}")
+
+
+@app.get("/analytics/recommend/early-stopping/figure")
+async def get_recommend_early_stopping_figure(budget: int = 50):
+    """Get the stopping-threshold diagnostic figure as PNG.
+
+    Diagnostic, not inferential: shows that the selected k_stop sits on a
+    smooth payoff landscape rather than a spike.
+
+    Args:
+        budget: total iteration budget replayed
+    """
+    from analytics.q5 import get_k_sweep_figure
+    from fastapi.responses import Response
+
+    try:
+        figure_bytes = await asyncio.to_thread(
+            get_k_sweep_figure, None, budget
+        )
+        return Response(content=figure_bytes, media_type="image/png")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Figure generation error: {str(e)}")
+
+
+@app.get("/analytics/recommend/replication/figure")
+async def get_recommend_replication_figure(budget: int = 50):
+    """Get the budget-splitting diagnostic figure as PNG.
+
+    Diagnostic, not inferential: shows how the score varies with replicate
+    count at equal spend, with and without early stopping applied.
+
+    Args:
+        budget: total iteration budget replayed
+    """
+    from analytics.q5 import get_n_curve_figure
+    from fastapi.responses import Response
+
+    try:
+        figure_bytes = await asyncio.to_thread(
+            get_n_curve_figure, None, budget
+        )
         return Response(content=figure_bytes, media_type="image/png")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Figure generation error: {str(e)}")
