@@ -28,19 +28,4 @@ ROAR ships with built-in analytics pipelines for exploring pooled run data, incl
 ## Dataset
 https://anonymous-hf.com/a/wi4bx0406p7s/
 
-
-## How to Cite
-
-If you use ROAR in your research, please cite our preprint:
-
-```bibtex
-@misc{lin2026roar,
-  title        = {{ROAR}: Unifying Runs across Heterogeneous {AI}-Driven Research Systems},
-  author       = {Lin, Leo Y. and Ramani, Vishakha and Celik, Z. Berkay and Castro, Paul and Ellis, Marquita},
-  year         = {2026},
-  note         = {Preprint},
-  howpublished = {\url{https://github.com/<org>/<repo>}}
-}
-```
-
-Leo Y. Lin, Vishakha Ramani, Z. Berkay Celik, Paul Castro, and Marquita Ellis. *ROAR: Unifying Runs across Heterogeneous AI-Driven Research Systems.* Preprint, 2026.
+This dataset is released under the Creative Commons Attribution 4.0 International license (CC BY 4.0). You may share and adapt it for any purpose, provided you give appropriate credit.
